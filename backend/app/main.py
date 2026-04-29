@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.models.schemas import HealthResponse
-from app.api import repos
+from app.api import repos, chat
 
 app = FastAPI(
     title="CodeRAG API",
@@ -21,6 +21,7 @@ app.add_middleware(
 )
 
 app.include_router(repos.router)
+app.include_router(chat.router)
 
 
 @app.get("/")
