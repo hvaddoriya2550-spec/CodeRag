@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import type { ChatMessage, ChunkSource } from '@/types'
+import type { ChatMessage, ChatRequest, ChunkSource, SSEEvent } from '@/types'
+import * as api from '@/lib/api'
 
 interface ChatState {
   // --- state ---
@@ -9,6 +10,8 @@ interface ChatState {
   // Sources land as one SSE event before any tokens arrive.
   // We park them here until the message is finalised.
   currentSources: ChunkSource[]
+  // Held so the stream can be cancelled if the user navigates away mid-reply.
+  abortController: AbortController | null
 
   // --- actions ---
   getMessages: (repoId: string) => ChatMessage[]
@@ -19,12 +22,15 @@ interface ChatState {
   finalizeAssistantMessage: (repoId: string) => void
   setStreaming: (streaming: boolean) => void
   clearChat: (repoId: string) => void
+  sendMessage: (repoId: string, question: string) => Promise<void>
+  cancelStream: () => void
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messagesByRepo: {},
   isStreaming: false,
   currentSources: [],
+  abortController: null,
 
   getMessages: (repoId) => get().messagesByRepo[repoId] ?? [],
 
@@ -96,5 +102,67 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({
       messagesByRepo: { ...state.messagesByRepo, [repoId]: [] },
     }))
+  },
+
+  // Capture history BEFORE adding the new user message so the backend receives
+  // only prior turns — not the question it's about to answer.
+  sendMessage: async (repoId, question) => {
+    const history = get().getMessages(repoId)
+
+    get().addUserMessage(repoId, question)
+
+    // The blank assistant message must exist before the first token arrives;
+    // otherwise appendToken would have no target to write into.
+    get().startAssistantMessage(repoId)
+
+    const controller = new AbortController()
+    set({ isStreaming: true, currentSources: [], abortController: controller })
+
+    const request: ChatRequest = {
+      question,
+      repo_id: repoId,
+      conversation_history: history,
+    }
+
+    await api.streamChat(
+      request,
+      (event: SSEEvent) => {
+        if (event.type === 'sources') {
+          // The sources event carries all retrieved chunks in one shot,
+          // before any text tokens. We park them and attach them to the
+          // message when finalizeAssistantMessage is called.
+          get().setSources((event.data as { chunks: ChunkSource[] }).chunks)
+        } else if (event.type === 'token') {
+          // Each token event appends one streamed text fragment to the
+          // in-progress assistant message.
+          get().appendToken(repoId, (event.data as { text: string }).text)
+        } else if (event.type === 'done') {
+          // The backend signals the stream is complete. Attach sources and
+          // clear streaming state so the UI unlocks the input.
+          get().finalizeAssistantMessage(repoId)
+          set({ isStreaming: false, abortController: null })
+        } else if (event.type === 'error') {
+          // A server-side error mid-stream: surface it inline rather than
+          // losing the partial reply the user already read.
+          get().appendToken(repoId, `\n\n⚠️ Error: ${(event.data as { message: string }).message}`)
+          get().finalizeAssistantMessage(repoId)
+          set({ isStreaming: false, abortController: null })
+        }
+      },
+      (err: Error) => {
+        // Network failure or other client-side error. Same strategy: append
+        // inline rather than silently losing the partial message.
+        get().appendToken(repoId, `\n\n⚠️ Connection error: ${err.message}`)
+        get().finalizeAssistantMessage(repoId)
+        set({ isStreaming: false, abortController: null })
+      },
+      controller.signal,
+    )
+  },
+
+  cancelStream: () => {
+    const ctrl = get().abortController
+    if (ctrl) ctrl.abort()
+    set({ isStreaming: false, abortController: null })
   },
 }))

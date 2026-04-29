@@ -53,6 +53,14 @@ export interface ChatRequest {
   conversation_history: ChatMessage[]
 }
 
+export interface FileContent {
+  path: string
+  content: string
+  language: string
+  size: number
+  line_count: number
+}
+
 // Describes each event in the SSE stream from POST /api/chat.
 // The backend emits: sources → token (repeated) → done | error
 export interface SSEEvent {

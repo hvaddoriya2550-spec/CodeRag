@@ -4,6 +4,7 @@ import type {
   IngestResponse,
   RepoStatus,
   RepoInfo,
+  FileContent,
   ChatRequest,
   SSEEvent,
 } from '@/types'
@@ -55,6 +56,11 @@ export async function deleteRepo(repoId: string): Promise<{ deleted: boolean }> 
 
 export async function checkHealth(): Promise<{ status: string }> {
   const res = await apiClient.get<{ status: string }>('/api/health')
+  return res.data
+}
+
+export async function getFileContent(repoId: string, path: string): Promise<FileContent> {
+  const res = await apiClient.get<FileContent>(`/api/repos/${repoId}/file`, { params: { path } })
   return res.data
 }
 

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import logging
+import os
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
+from app.config import settings
 from app.models.schemas import IngestRequest, IngestResponse, RepoInfo, RepoStatus
 from app.services.github import get_repo_id, validate_github_url
 from app.services.ingestion import ingest_repository
 from app.services import status_store, vector_store
+from app.services.vector_store import collection_exists
 
 logger = logging.getLogger(__name__)
 
@@ -71,3 +74,46 @@ async def delete_repo(repo_id: str) -> None:
     vector_store.delete_collection(repo_id)
     status_store.delete_status(repo_id)
     logger.info("Deleted repo %s", repo_id)
+
+
+LANG_MAP: dict[str, str] = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript",
+    ".jsx": "jsx", ".tsx": "tsx", ".md": "markdown", ".json": "json",
+    ".yml": "yaml", ".yaml": "yaml", ".html": "html", ".css": "css",
+}
+
+MAX_VIEWER_SIZE = 1_000_000  # 1 MB
+
+
+@router.get("/{repo_id}/file")
+async def get_file(repo_id: str, path: str = Query(...)) -> dict:
+    if not collection_exists(repo_id):
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    # os.path.abspath canonicalizes both paths (resolves all `..` segments) so
+    # `startswith` reliably proves the requested file lives inside the repo root.
+    repo_root = os.path.abspath(os.path.join(settings.repos_path, repo_id))
+    requested = os.path.abspath(os.path.join(repo_root, path))
+    if not requested.startswith(repo_root + os.sep) and requested != repo_root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if not os.path.isfile(requested):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    size = os.path.getsize(requested)
+    if size > MAX_VIEWER_SIZE:
+        raise HTTPException(status_code=413, detail="File too large to display")
+
+    with open(requested, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    ext = os.path.splitext(path)[1].lower()
+    language = LANG_MAP.get(ext, "text")
+
+    return {
+        "path": path,
+        "content": content,
+        "language": language,
+        "size": size,
+        "line_count": content.count("\n") + 1,
+    }
