@@ -1,6 +1,5 @@
-import { FileCode } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
 import type { ChunkSource } from '@/types'
+import { ExternalLink } from 'lucide-react'
 
 interface SourceCardProps {
   source: ChunkSource
@@ -11,23 +10,14 @@ export function SourceCard({ source, onClick }: SourceCardProps) {
   return (
     <button
       onClick={onClick}
-      className="p-3 border rounded-lg hover:border-primary transition-colors cursor-pointer text-left w-full"
+      className="w-full text-left bg-[#111118] border border-[#222] p-3 flex flex-col gap-1 hover:border-[#444] transition-colors"
     >
-      <div className="flex items-center gap-1.5 mb-1 min-w-0">
-        <FileCode className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <span className="font-mono text-xs truncate text-foreground">
-          {source.file_path}
-        </span>
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] text-[#71717a] truncate">{source.file_path}</span>
+        <ExternalLink className="w-2.5 h-2.5 text-[#52525b] shrink-0 ml-2" />
       </div>
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span className="font-medium truncate">{source.name}</span>
-        <Badge variant="secondary" className="shrink-0">
-          {source.chunk_type}
-        </Badge>
-        <span className="shrink-0">
-          Lines {source.start_line}–{source.end_line}
-        </span>
-      </div>
+      <p className="font-mono text-xs text-[#d4d4d8] truncate">{source.name}</p>
+      <span className="font-mono text-[10px] text-[#71717a] uppercase">LINES {source.start_line}–{source.end_line}</span>
     </button>
   )
 }

@@ -9,9 +9,10 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "llama-3.3-70b-versatile"
-REWRITE_MAX_TOKENS = 200
-CHAT_MAX_TOKENS = 2048
+CHAT_MODEL = "llama-3.3-70b-versatile"
+REWRITE_MODEL = "llama-3.1-8b-instant"  # cheaper/faster for the rewrite-only step
+REWRITE_MAX_TOKENS = 150
+CHAT_MAX_TOKENS = 1024
 TEMPERATURE = 0.2
 
 _client: AsyncGroq | None = None
@@ -33,7 +34,7 @@ async def rewrite_query(question: str, conversation_history: list) -> str:
 
     messages = build_rewrite_messages(question, conversation_history)
     response = await get_client().chat.completions.create(
-        model=MODEL_NAME,
+        model=REWRITE_MODEL,
         messages=messages,
         max_tokens=REWRITE_MAX_TOKENS,
         temperature=0.0,
@@ -54,7 +55,7 @@ async def stream_answer(messages: list[dict]) -> AsyncGenerator[str, None]:
     logger.info("Starting stream for %d-message conversation", len(messages))
     try:
         stream = await get_client().chat.completions.create(
-            model=MODEL_NAME,
+            model=CHAT_MODEL,
             messages=messages,
             max_tokens=CHAT_MAX_TOKENS,
             temperature=TEMPERATURE,
