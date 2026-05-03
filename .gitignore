@@ -1,0 +1,9 @@
+# MCP server config (contains API keys)
+.mcp.json
+
+# Claude Code local config and project instructions
+CLAUDE.md
+.claude/
+
+# Graphify knowledge graph output
+graphify-out/
