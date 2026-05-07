@@ -6,16 +6,17 @@ from app.services.chunking import chunk_repository
 from app.services.embedding import embed_texts, build_chunk_text
 from app.services.vector_store import add_chunks, delete_collection
 from app.services.status_store import set_status
+from app.services.metadata_store import save_metadata
 
 logger = logging.getLogger(__name__)
 
 
-def ingest_repository(github_url: str, repo_id: str) -> None:
+def ingest_repository(github_url: str, repo_id: str, branch: str = "main") -> None:
     try:
         # Step 1 — Clone
         set_status(repo_id, status="cloning", progress=10,
                    message="Cloning repository", github_url=github_url)
-        repo_path = clone_repo(github_url, repo_id)
+        repo_path = clone_repo(github_url, repo_id, branch)
         logger.info("Cloned to %s", repo_path)
 
         # Step 2 — Parse
@@ -48,6 +49,8 @@ def ingest_repository(github_url: str, repo_id: str) -> None:
                    chunk_count=count,
                    file_count=result["file_count"],
                    message=f"Ready — indexed {count} chunks from {result['file_count']} files")
+        save_metadata(repo_id, github_url=github_url, branch=branch,
+                      file_count=result["file_count"], chunk_count=count)
         logger.info("Ingestion complete for %s", repo_id)
 
     except Exception as e:

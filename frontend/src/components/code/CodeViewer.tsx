@@ -52,6 +52,13 @@ export function CodeViewer({ repoId, filePath, highlightRange, onClose }: CodeVi
     container.scrollTo({ top: targetY, behavior: 'smooth' })
   }, [highlightRange, content])
 
+  useEffect(() => {
+    if (!onClose || !filePath) return
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose, filePath])
+
   // ── Empty state ──
   if (!filePath) {
     return (

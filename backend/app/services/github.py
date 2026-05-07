@@ -31,15 +31,18 @@ def get_repo_path(repo_id: str) -> str:
     return os.path.join(settings.repos_path, repo_id)
 
 
-def clone_repo(url: str, repo_id: str) -> str:
+def clone_repo(url: str, repo_id: str, branch: str = "main") -> str:
     path = get_repo_path(repo_id)
     if os.path.exists(path):
         shutil.rmtree(path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Only pass branch explicitly when non-default; omitting it clones the
+    # remote HEAD so repos that still use "master" work without user intervention.
+    clone_kwargs: dict = {} if branch == "main" else {"branch": branch}
     try:
-        git.Repo.clone_from(url, path)
+        git.Repo.clone_from(url, path, **clone_kwargs)
     except git.GitCommandError as e:
-        raise RuntimeError(f"Failed to clone {url}: {e}") from e
+        raise RuntimeError(f"Failed to clone {url} (branch={branch}): {e}") from e
     return path
 
 

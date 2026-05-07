@@ -14,6 +14,7 @@ interface ReposState {
   loadRepos: () => Promise<void>
   selectRepo: (repoId: string | null) => void
   ingestRepo: (githubUrl: string) => Promise<string>
+  reingestRepo: (githubUrl: string) => Promise<string>
   removeRepo: (repoId: string) => Promise<void>
   getRepoById: (repoId: string) => RepoInfo | undefined
 }
@@ -41,6 +42,12 @@ export const useReposStore = create<ReposState>()(
       ingestRepo: async (githubUrl) => {
         const res = await api.ingestRepo(githubUrl)
         // Refresh the list so the new repo appears immediately
+        await get().loadRepos()
+        return res.repo_id
+      },
+
+      reingestRepo: async (githubUrl) => {
+        const res = await api.ingestRepo(githubUrl)
         await get().loadRepos()
         return res.repo_id
       },

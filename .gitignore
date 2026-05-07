@@ -5,5 +5,9 @@
 CLAUDE.md
 .claude/
 
+# AI agent configs
+.agents/
+.codex/
+
 # Graphify knowledge graph output
 graphify-out/

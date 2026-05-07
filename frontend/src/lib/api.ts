@@ -19,10 +19,20 @@ const apiClient = axios.create({
   timeout: 30_000,
 })
 
-// Unwrap FastAPI's { detail: "..." } error shape into a plain Error.
-// Every rejected axios call in this file will have a human-readable message.
+// Track latency of the most recent API call so the status bar can display it.
+export let lastApiLatencyMs = 0
+
+apiClient.interceptors.request.use((config) => {
+  ;(config as typeof config & { _t: number })._t = Date.now()
+  return config
+})
+
 apiClient.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    const t = (res.config as typeof res.config & { _t?: number })._t
+    if (t) lastApiLatencyMs = Date.now() - t
+    return res
+  },
   (err) => {
     const message = err.response?.data?.detail ?? err.message
     return Promise.reject(new Error(message))
@@ -49,9 +59,8 @@ export async function listRepos(): Promise<RepoInfo[]> {
   return res.data
 }
 
-export async function deleteRepo(repoId: string): Promise<{ deleted: boolean }> {
-  const res = await apiClient.delete<{ deleted: boolean }>(`/api/repos/${repoId}`)
-  return res.data
+export async function deleteRepo(repoId: string): Promise<void> {
+  await apiClient.delete(`/api/repos/${repoId}`)
 }
 
 export async function checkHealth(): Promise<{ status: string }> {
@@ -61,6 +70,11 @@ export async function checkHealth(): Promise<{ status: string }> {
 
 export async function getFileContent(repoId: string, path: string): Promise<FileContent> {
   const res = await apiClient.get<FileContent>(`/api/repos/${repoId}/file`, { params: { path } })
+  return res.data
+}
+
+export async function getRepoTree(repoId: string): Promise<{ repo_id: string; tree: import('@/types').TreeNode[] }> {
+  const res = await apiClient.get<{ repo_id: string; tree: import('@/types').TreeNode[] }>(`/api/repos/${repoId}/tree`)
   return res.data
 }
 

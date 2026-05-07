@@ -126,7 +126,8 @@ export const useChatStore = create<ChatState>()(
         const request: ChatRequest = {
           question,
           repo_id: repoId,
-          conversation_history: history,
+          // Strip frontend-only `sources` field — backend only needs role + content.
+          conversation_history: history.map(({ role, content }) => ({ role, content })),
         }
 
         await api.streamChat(

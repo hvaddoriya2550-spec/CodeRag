@@ -67,3 +67,11 @@ export interface SSEEvent {
   type: 'sources' | 'token' | 'done' | 'error'
   data: unknown           // narrowed at the call site based on `type`
 }
+
+export interface TreeNode {
+  name: string
+  path: string
+  type: 'file' | 'dir'
+  viewable?: boolean      // only on file nodes
+  children?: TreeNode[]   // only on dir nodes
+}

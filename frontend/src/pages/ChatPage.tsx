@@ -3,14 +3,16 @@ import { useNavigate, useParams } from 'react-router-dom'
 import {
   AlertCircle, ArrowLeft, FolderOpen, MessageSquare,
   FileText, Activity, Terminal, Search, Bell, Settings,
-  Trash2, GitBranch, Share2, History, Plus,
+  Trash2, GitBranch, Share2, History, Plus, StopCircle, RefreshCw, Download,
 } from 'lucide-react'
 import confetti from 'canvas-confetti'
 import { useReposStore } from '@/store/reposStore'
 import { useChatStore } from '@/store/chatStore'
+import { lastApiLatencyMs } from '@/lib/api'
 import { MessageList } from '@/components/chat/MessageList'
 import { ChatInput } from '@/components/chat/ChatInput'
 import { CodeViewer } from '@/components/code/CodeViewer'
+import { FileTree } from '@/components/repo/FileTree'
 import type { ChatMessage, RepoStatus } from '@/types'
 import * as api from '@/lib/api'
 
@@ -44,7 +46,7 @@ const NAV_ITEMS = [
   { icon: FolderOpen,    label: 'REPOSITORY' },
   { icon: MessageSquare, label: 'CONVERSATIONS' },
   { icon: FileText,      label: 'FILE_INDEX' },
-  { icon: Activity,      label: 'SYSTEM_LOGS', active: true },
+  { icon: Activity,      label: 'SYSTEM_LOGS' },
   { icon: Terminal,      label: 'TERMINAL' },
 ]
 
@@ -63,8 +65,12 @@ function IngestingView({ name, status }: { name: string; status: RepoStatus | nu
   const filledCount  = Math.round((progress / 100) * totalSquares)
   const activeIdx    = filledCount // next square to animate
 
-  // Simulate scrolling log lines
-  const logTime = new Date().toTimeString().slice(0, 8)
+  const [logTime, setLogTime] = useState(new Date().toTimeString().slice(0, 8))
+  useEffect(() => {
+    if (isReady) return
+    const id = setInterval(() => setLogTime(new Date().toTimeString().slice(0, 8)), 1000)
+    return () => clearInterval(id)
+  }, [isReady])
   const stageLabel = STAGE_LABELS[Math.min(activeStep, 3)] ?? 'PENDING'
 
   return (
@@ -78,13 +84,10 @@ function IngestingView({ name, status }: { name: string; status: RepoStatus | nu
           <p className="font-mono text-[10px] text-[#71717a] tracking-wide uppercase mt-0.5">STATUS: ENCRYPTED</p>
         </div>
         <nav className="flex-1 py-4">
-          {NAV_ITEMS.map(({ icon: Icon, label, active }) => (
+          {NAV_ITEMS.map(({ icon: Icon, label }) => (
             <div
               key={label}
-              className={`flex items-center gap-3 px-6 py-3 cursor-pointer transition-colors
-                ${active
-                  ? 'bg-[#0a0a0f] border-l-2 border-[#b9ff66] pl-[22px] text-[#b9ff66]'
-                  : 'text-[#71717a] hover:text-[#a1a1aa]'}`}
+              className="flex items-center gap-3 px-6 py-3 cursor-pointer transition-colors text-[#71717a] hover:text-[#a1a1aa]"
             >
               <Icon className="w-4 h-4 shrink-0" />
               <span className="font-mono text-xs tracking-wide uppercase">{label}</span>
@@ -282,6 +285,243 @@ function NotFoundView() {
   )
 }
 
+// ── Chat export ───────────────────────────────────────────────────────────────
+
+// ── Markdown → HTML (minimal, covers patterns the AI generates) ───────────────
+
+function mdToHtml(md: string): string {
+  let h = md
+
+  // Fenced code blocks — extract first so inner content isn't mangled
+  const blocks: string[] = []
+  h = h.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const idx = blocks.push(`<pre><code class="lang-${lang || 'text'}">${escaped.trimEnd()}</code></pre>`) - 1
+    return `\x00BLOCK${idx}\x00`
+  })
+
+  // Headings
+  h = h.replace(/^#### (.+)$/gm, '<h4>$1</h4>')
+  h = h.replace(/^### (.+)$/gm, '<h3>$1</h3>')
+  h = h.replace(/^## (.+)$/gm, '<h2>$1</h2>')
+  h = h.replace(/^# (.+)$/gm, '<h1>$1</h1>')
+
+  // Tables (header | separator | rows)
+  h = h.replace(/(\|.+\|[ \t]*\n\|[ \t:|-]+\|[ \t]*\n(?:\|.+\|[ \t]*\n?)*)/g, (tbl) => {
+    const rows = tbl.trim().split('\n')
+    const th = rows[0].split('|').slice(1, -1).map(c => `<th>${c.trim()}</th>`).join('')
+    const tbody = rows.slice(2).map(r => {
+      const tds = r.split('|').slice(1, -1).map(c => `<td>${c.trim()}</td>`).join('')
+      return `<tr>${tds}</tr>`
+    }).join('')
+    return `<table><thead><tr>${th}</tr></thead><tbody>${tbody}</tbody></table>`
+  })
+
+  // Inline styles (order matters: bold before italic)
+  h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  h = h.replace(/\*(.+?)\*/g,     '<em>$1</em>')
+  h = h.replace(/`([^`]+)`/g,     '<code>$1</code>')
+
+  // Citation badges [file:start-end]
+  h = h.replace(/\[([^\]\s]+:\d+-\d+)\]/g,
+    '<span class="cite">[$1]</span>')
+
+  // Bullet lists
+  h = h.replace(/((?:^[-*] .+\n?)+)/gm, (block) => {
+    const items = block.trim().split('\n').map(l => `<li>${l.replace(/^[-*] /, '')}</li>`).join('')
+    return `<ul>${items}</ul>`
+  })
+
+  // Numbered lists
+  h = h.replace(/((?:^\d+\. .+\n?)+)/gm, (block) => {
+    const items = block.trim().split('\n').map(l => `<li>${l.replace(/^\d+\. /, '')}</li>`).join('')
+    return `<ol>${items}</ol>`
+  })
+
+  // Paragraphs: double-newline separated chunks not already wrapped in tags
+  h = h.split(/\n{2,}/).map(chunk => {
+    const c = chunk.trim()
+    if (!c || /^\x00BLOCK/.test(c) || /^<(h[1-4]|ul|ol|table|pre)/.test(c)) return c
+    return `<p>${c.replace(/\n/g, '<br>')}</p>`
+  }).join('\n')
+
+  // Restore code blocks
+  h = h.replace(/\x00BLOCK(\d+)\x00/g, (_, i) => blocks[Number(i)])
+
+  return h
+}
+
+// ── Chat HTML export ──────────────────────────────────────────────────────────
+
+function exportChatAsHtml(repoName: string, messages: ChatMessage[]) {
+  const date = new Date().toLocaleString()
+  const qCount = messages.filter(m => m.role === 'user').length
+
+  const msgsHtml = messages.map((msg, idx) => {
+    if (msg.role === 'user') {
+      return `
+      <div class="msg user-msg">
+        <div class="msg-label">
+          <span class="dot dot-user"></span>USER_INPUT
+          <span class="msg-num">#${Math.floor(idx / 2) + 1}</span>
+        </div>
+        <div class="msg-body user-body">${msg.content}</div>
+      </div>`
+    }
+
+    const sourcesHtml = msg.sources?.length
+      ? `<div class="sources">
+          <div class="sources-label">RETRIEVED SOURCES</div>
+          <div class="chips">
+            ${msg.sources.map(s => `
+            <span class="chip">
+              <span class="chip-path">${s.file_path}</span>
+              <span class="chip-line">:${s.start_line}–${s.end_line}</span>
+              <span class="chip-type">${s.chunk_type}</span>
+            </span>`).join('')}
+          </div>
+        </div>`
+      : ''
+
+    return `
+      <div class="msg ai-msg">
+        <div class="msg-label">
+          <span class="dot dot-ai"></span>CODERAG_AI
+        </div>
+        <div class="msg-body ai-body">${mdToHtml(msg.content)}</div>
+        ${sourcesHtml}
+      </div>`
+  }).join('\n      <div class="divider"></div>\n')
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeRAG — ${repoName}</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0a0a0f; color: #a1a1aa;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px; line-height: 1.7;
+  padding: 40px 24px; max-width: 860px; margin: 0 auto;
+}
+/* ── Header ── */
+.header {
+  border: 1px solid #222; background: #111118;
+  padding: 24px 28px; margin-bottom: 40px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.header-brand { font-family: monospace; color: #b9ff66; font-size: 11px; letter-spacing: .2em; text-transform: uppercase; }
+.header-repo  { color: #fff; font-size: 22px; font-weight: 600; letter-spacing: -.01em; }
+.header-meta  { font-family: monospace; font-size: 10px; color: #52525b; letter-spacing: .1em; text-transform: uppercase; margin-top: 4px; }
+.header-meta span { color: #71717a; margin-right: 20px; }
+/* ── Messages ── */
+.msg { padding: 20px 24px; }
+.msg-label {
+  font-family: monospace; font-size: 10px; letter-spacing: .15em;
+  text-transform: uppercase; margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+.dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.dot-user { background: #71717a; }
+.dot-ai   { background: #b9ff66; }
+.msg-num  { margin-left: auto; color: #3f3f46; }
+.user-msg  { background: #111118; border-left: 2px solid #b9ff66; }
+.user-msg .msg-label { color: #b9ff66; }
+.user-body { color: #fff; font-size: 15px; }
+.ai-msg   { background: #0a0a0f; border-left: 2px solid #222; }
+.ai-msg .msg-label { color: #52525b; }
+.ai-body  { color: #a1a1aa; }
+/* ── Markdown elements ── */
+.ai-body h1,.ai-body h2 { color: #e4e4e7; font-size: 15px; font-weight: 600; margin: 20px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #1a1a20; }
+.ai-body h3,.ai-body h4 { color: #d4d4d8; font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+.ai-body p  { margin-bottom: 10px; }
+.ai-body strong { color: #e4e4e7; }
+.ai-body em     { color: #d4d4d8; font-style: italic; }
+.ai-body code {
+  background: #111118; border: 1px solid #1a1a20;
+  padding: 1px 6px; font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: 12px; color: #b9ff66; border-radius: 2px;
+}
+.ai-body pre {
+  background: #050508; border: 1px solid #222;
+  padding: 16px 18px; overflow-x: auto; margin: 14px 0; border-radius: 2px;
+}
+.ai-body pre code {
+  background: none; border: none; padding: 0;
+  color: #e0e4d4; font-size: 13px; line-height: 1.6;
+}
+.ai-body ul,.ai-body ol { padding-left: 22px; margin-bottom: 10px; }
+.ai-body li   { margin-bottom: 4px; }
+.ai-body table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13px; }
+.ai-body th {
+  background: #111118; color: #b9ff66; text-align: left;
+  padding: 8px 12px; border: 1px solid #222;
+  font-family: monospace; font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+}
+.ai-body td { padding: 8px 12px; border: 1px solid #1a1a20; color: #a1a1aa; }
+.ai-body tr:nth-child(even) td { background: #0d0d14; }
+.cite {
+  display: inline-block; background: #111118; border: 1px solid #1a1a20;
+  padding: 0 5px; font-family: monospace; font-size: 11px; color: #52525b;
+  border-radius: 2px; vertical-align: middle;
+}
+/* ── Sources ── */
+.sources { margin-top: 20px; padding-top: 14px; border-top: 1px solid #1a1a20; }
+.sources-label { font-family: monospace; font-size: 9px; color: #3f3f46; letter-spacing: .15em; text-transform: uppercase; margin-bottom: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 0;
+  background: #111118; border: 1px solid #1a1a20;
+  padding: 3px 10px; font-family: monospace; font-size: 11px; border-radius: 2px;
+}
+.chip-path { color: #71717a; }
+.chip-line { color: #b9ff66; }
+.chip-type { color: #3f3f46; margin-left: 8px; font-size: 10px; text-transform: uppercase; }
+/* ── Divider ── */
+.divider { border: none; border-top: 1px dashed #1a1a20; margin: 4px 0; }
+/* ── Footer ── */
+.footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid #1a1a20; font-family: monospace; font-size: 10px; color: #3f3f46; letter-spacing: .1em; text-transform: uppercase; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-brand">[ CODERAG_V1.0 // CHAT EXPORT ]</div>
+  <div class="header-repo">${repoName}</div>
+  <div class="header-meta">
+    <span>EXPORTED: ${date}</span>
+    <span>EXCHANGES: ${qCount}</span>
+    <span>MESSAGES: ${messages.length}</span>
+  </div>
+</div>
+
+${msgsHtml}
+
+<div class="footer">© CODERAG SYSTEMS — GENERATED ${date}</div>
+</body>
+</html>`
+
+  const blob = new Blob([html], { type: 'text/html' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `coderag-${repoName.replace('/', '_')}-chat.html`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// ── Starter questions ─────────────────────────────────────────────────────────
+
+const STARTER_QUESTIONS = [
+  'What does this repository do?',
+  'List all API endpoints and their purpose',
+  'Explain the main entry point and startup flow',
+  'What are the key classes and their responsibilities?',
+]
+
 // ── Main chat page ────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -294,19 +534,29 @@ export default function ChatPage() {
 
   const confettiFired = useRef(false)
 
-  const repos         = useReposStore((s) => s.repos)
-  const repo          = useReposStore((s) => (repoId ? s.getRepoById(repoId) : undefined))
+  const repos          = useReposStore((s) => s.repos)
+  const repo           = useReposStore((s) => (repoId ? s.getRepoById(repoId) : undefined))
   const isLoadingRepos = useReposStore((s) => s.isLoading)
-  const loadRepos     = useReposStore((s) => s.loadRepos)
-  const removeRepo    = useReposStore((s) => s.removeRepo)
+  const loadRepos      = useReposStore((s) => s.loadRepos)
+  const removeRepo     = useReposStore((s) => s.removeRepo)
+  const reingestRepo   = useReposStore((s) => s.reingestRepo)
 
-  const messages   = useChatStore((s) => (repoId ? s.getMessages(repoId) : EMPTY_MESSAGES))
-  const isStreaming = useChatStore((s) => s.isStreaming)
-  const sendMessage = useChatStore((s) => s.sendMessage)
-  const clearChat  = useChatStore((s) => s.clearChat)
+  const messages      = useChatStore((s) => (repoId ? s.getMessages(repoId) : EMPTY_MESSAGES))
+  const isStreaming   = useChatStore((s) => s.isStreaming)
+  const sendMessage   = useChatStore((s) => s.sendMessage)
+  const clearChat     = useChatStore((s) => s.clearChat)
+  const cancelStream  = useChatStore((s) => s.cancelStream)
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { loadRepos() }, [])
+
+  // If the repo errored in a previous session, pollStatus is null and we'd show
+  // a generic message. Fetch once to recover the actual error string.
+  useEffect(() => {
+    if (!repoId || repo?.status !== 'error' || pollStatus !== null) return
+    api.getRepoStatus(repoId).then(setPollStatus).catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoId, repo?.status])
 
   useEffect(() => {
     if (!repoId || !repo) return
@@ -348,6 +598,12 @@ export default function ChatPage() {
     if (!confirm(`Delete ${repoId}? This cannot be undone.`)) return
     await removeRepo(repoId)
     navigate('/')
+  }
+
+  const handleReingest = async () => {
+    if (!repo?.github_url) return
+    await reingestRepo(repo.github_url)
+    navigate(`/chat/${repoId}`)
   }
 
   if (isLoadingRepos && !repo) return null
@@ -463,28 +719,99 @@ export default function ChatPage() {
                 <History className="w-4.5 h-4.5" />
               </button>
               <button
+                onClick={() => exportChatAsHtml(repo.name, messages)}
+                disabled={messages.length === 0}
+                className="text-[#71717a] hover:text-[#b9ff66] transition-colors disabled:opacity-30"
+                title="Export chat as HTML"
+              >
+                <Download className="w-4.5 h-4.5" />
+              </button>
+              {repo.github_url && (
+                <button
+                  onClick={handleReingest}
+                  disabled={isStreaming}
+                  className="text-[#71717a] hover:text-[#b9ff66] transition-colors disabled:opacity-30"
+                  title="Re-index repository"
+                >
+                  <RefreshCw className="w-4.5 h-4.5" />
+                </button>
+              )}
+              <button
                 onClick={handleDelete}
                 className="text-[#71717a] hover:text-[#ef4444] transition-colors"
                 title="Delete repo"
               >
                 <Trash2 className="w-4.5 h-4.5" />
               </button>
-              <Share2 className="w-4.5 h-4.5 text-[#71717a]" />
+              {isStreaming ? (
+                <button
+                  onClick={cancelStream}
+                  className="flex items-center gap-1 border border-[#ef4444]/40 px-2 py-1 text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors font-mono text-[10px] uppercase"
+                  title="Stop generation"
+                >
+                  <StopCircle className="w-3.5 h-3.5" /> STOP
+                </button>
+              ) : (
+                <Share2 className="w-4.5 h-4.5 text-[#71717a]" />
+              )}
             </div>
           </div>
 
           <MessageList messages={messages} isStreaming={isStreaming} onCitationClick={handleCitation} />
+
+          {/* Starter questions — only when chat is empty */}
+          {messages.length === 0 && !isStreaming && (
+            <div className="px-6 pb-3 flex flex-wrap gap-2">
+              {STARTER_QUESTIONS.map((q) => (
+                <button
+                  key={q}
+                  onClick={() => handleSend(q)}
+                  className="border border-[#222] bg-[#111118] px-3 py-2 font-mono text-[11px] text-[#a1a1aa] hover:border-[#b9ff66] hover:text-[#b9ff66] transition-colors text-left"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
+
           <ChatInput onSend={handleSend} disabled={isStreaming} />
         </div>
 
-        {/* ── Right panel: code viewer ── */}
+        {/* ── Right panel: file tree / code viewer ── */}
         <aside className="w-[480px] bg-[#111118] border-l border-[#222] flex flex-col shrink-0">
-          <CodeViewer
-            repoId={repoId!}
-            filePath={viewerFile}
-            highlightRange={viewerRange}
-            onClose={() => { setViewerFile(null); setViewerRange(null) }}
-          />
+          {/* Panel tab bar */}
+          <div className="h-12 bg-[#0a0a0f] border-b border-[#222] flex items-center px-4 gap-4 shrink-0">
+            <button
+              onClick={() => { setViewerFile(null); setViewerRange(null) }}
+              className={`font-mono text-[10px] uppercase tracking-widest pb-0.5 transition-colors
+                ${!viewerFile
+                  ? 'text-[#b9ff66] border-b-2 border-[#b9ff66]'
+                  : 'text-[#71717a] hover:text-[#a1a1aa]'}`}
+            >
+              FILES
+            </button>
+            {viewerFile && (
+              <button
+                className="font-mono text-[10px] uppercase tracking-widest pb-0.5 text-[#b9ff66] border-b-2 border-[#b9ff66]"
+              >
+                VIEWER
+              </button>
+            )}
+          </div>
+
+          {viewerFile ? (
+            <CodeViewer
+              repoId={repoId!}
+              filePath={viewerFile}
+              highlightRange={viewerRange}
+              onClose={() => { setViewerFile(null); setViewerRange(null) }}
+            />
+          ) : (
+            <FileTree
+              repoId={repoId!}
+              onFileClick={(path) => { setViewerFile(path); setViewerRange(null) }}
+            />
+          )}
         </aside>
       </div>
 
@@ -495,10 +822,15 @@ export default function ChatPage() {
             <div className="w-2 h-2 rounded-full bg-[#b9ff66]" />
             <span className="font-mono text-[10px] text-[#71717a]">CONNECTION_STABLE</span>
           </div>
-          <span className="font-mono text-[10px] text-[#71717a]">LATENCY: 14MS</span>
+          <span className="font-mono text-[10px] text-[#71717a]">MSGS: {messages.length}</span>
+          {lastApiLatencyMs > 0 && (
+            <span className="font-mono text-[10px] text-[#71717a]">LATENCY: {lastApiLatencyMs}MS</span>
+          )}
         </div>
         <div className="flex items-center gap-4">
-          <span className="font-mono text-[10px] text-[#71717a]">MEM: 1.4GB / 4.0GB</span>
+          <span className={`font-mono text-[10px] ${isStreaming ? 'text-[#b9ff66]' : 'text-[#71717a]'}`}>
+            {isStreaming ? 'STREAM_ACTIVE' : 'STREAM_IDLE'}
+          </span>
           <span className="font-mono text-[10px] text-[#3f3f46]">|</span>
           <span className="font-mono text-[10px] text-[#b9ff66]">v1.0.0-STABLE</span>
         </div>

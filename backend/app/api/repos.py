@@ -11,6 +11,7 @@ from app.services.github import get_repo_id, validate_github_url
 from app.services.ingestion import ingest_repository
 from app.services import status_store, vector_store
 from app.services.vector_store import collection_exists
+from app.services.metadata_store import delete_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ async def ingest(request: IngestRequest, background_tasks: BackgroundTasks) -> I
 
     status_store.set_status(repo_id, status="pending", progress=0,
                             message="Queued for ingestion", github_url=request.github_url)
-    background_tasks.add_task(ingest_repository, request.github_url, repo_id)
+    background_tasks.add_task(ingest_repository, request.github_url, repo_id, request.branch)
     logger.info("Queued ingestion for %s", repo_id)
     return IngestResponse(repo_id=repo_id, status="pending", message="Ingestion started")
 
@@ -73,7 +74,52 @@ async def delete_repo(repo_id: str) -> None:
         raise HTTPException(status_code=404, detail="Repo not found")
     vector_store.delete_collection(repo_id)
     status_store.delete_status(repo_id)
+    delete_metadata(repo_id)
     logger.info("Deleted repo %s", repo_id)
+
+
+SUPPORTED_VIEW_EXTS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx",
+    ".md", ".json", ".yml", ".yaml", ".html", ".css", ".txt", ".sh",
+}
+
+SKIP_DIRS = {"node_modules", ".git", "venv", "__pycache__", "dist", "build", ".mypy_cache"}
+
+
+@router.get("/{repo_id}/tree")
+async def get_tree(repo_id: str) -> dict:
+    if not collection_exists(repo_id):
+        raise HTTPException(status_code=404, detail="Repo not found")
+
+    repo_root = os.path.abspath(os.path.join(settings.repos_path, repo_id))
+    if not os.path.isdir(repo_root):
+        raise HTTPException(status_code=404, detail="Repo files not found on disk")
+
+    def build_node(path: str, rel: str) -> dict:
+        name = os.path.basename(path)
+        if os.path.isdir(path):
+            children = []
+            try:
+                entries = sorted(os.scandir(path), key=lambda e: (e.is_file(), e.name.lower()))
+            except PermissionError:
+                entries = []
+            for entry in entries:
+                if entry.name.startswith(".") or entry.name in SKIP_DIRS:
+                    continue
+                child_rel = f"{rel}/{entry.name}" if rel else entry.name
+                children.append(build_node(entry.path, child_rel))
+            return {"name": name, "path": rel, "type": "dir", "children": children}
+        else:
+            ext = os.path.splitext(name)[1].lower()
+            return {
+                "name": name,
+                "path": rel,
+                "type": "file",
+                "viewable": ext in SUPPORTED_VIEW_EXTS,
+            }
+
+    root_node = build_node(repo_root, "")
+    return {"repo_id": repo_id, "tree": root_node.get("children", [])}
 
 
 LANG_MAP: dict[str, str] = {

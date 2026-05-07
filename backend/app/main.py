@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import uvicorn
@@ -9,6 +10,9 @@ from app.config import settings
 from app.models.schemas import HealthResponse
 from app.api import repos, chat
 from app.services import status_store, vector_store
+from app.services.metadata_store import load_metadata
+from app.services.embedding import get_embedding_model
+from app.services.reranker import get_reranker_model
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +29,15 @@ def _reconcile_status_store() -> None:
         if status_store.get_status(col.name) is not None:
             continue  # already in store (fresh ingestion this session)
         chunk_count = vector_store.get_collection_count(col.name)
+        meta = load_metadata(col.name) or {}
         status_store.set_status(
             repo_id=col.name,
             status="ready",
             progress=100,
             message="Restored from persistent storage",
-            chunk_count=chunk_count,
+            chunk_count=meta.get("chunk_count", chunk_count),
+            file_count=meta.get("file_count", 0),
+            github_url=meta.get("github_url"),
         )
         logger.info("Restored repo '%s' (%d chunks) from ChromaDB", col.name, chunk_count)
 
@@ -38,6 +45,11 @@ def _reconcile_status_store() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _reconcile_status_store()
+    # Pre-load ML models in a thread pool so the first chat request doesn't
+    # pay a 3-5s cold-start penalty downloading/initialising the embedder.
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, get_embedding_model)
+    loop.run_in_executor(None, get_reranker_model)
     yield
 
 
